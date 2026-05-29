@@ -124,3 +124,89 @@ def build_html_email(deals):
           <td style="padding:8px 12px;border-bottom:1px solid #eee">
             <a href="{d['url']}" style="color:#2563eb;text-decoration:none">View Deal →</a>
           </td>
+        </tr>"""
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f9fafb;padding:24px">
+      <div style="max-width:780px;margin:auto;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden">
+        <div style="background:#111;padding:24px 32px">
+          <h1 style="color:#fff;margin:0;font-size:22px">👟 Shoe Deal Alert</h1>
+          <p style="color:#aaa;margin:4px 0 0">{len(deals)} deal(s) found under ${PRICE_THRESHOLD:.0f} — {datetime.now().strftime('%B %d, %Y')}</p>
+        </div>
+        <div style="padding:24px 32px">
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <thead>
+              <tr style="background:#f3f4f6">
+                <th style="padding:10px 12px;text-align:left">Shoe</th>
+                <th style="padding:10px 12px;text-align:left">Listing</th>
+                <th style="padding:10px 12px;text-align:left">Price</th>
+                <th style="padding:10px 12px;text-align:left">Store</th>
+                <th style="padding:10px 12px;text-align:left">Link</th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+        <div style="padding:16px 32px;background:#f9fafb;font-size:12px;color:#6b7280">
+          Threshold: ${PRICE_THRESHOLD:.2f} • Scanner ran at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+        </div>
+      </div>
+    </body></html>"""
+
+
+def send_email(deals):
+    if not all([GMAIL_USER, GMAIL_APP_PASSWORD, ALERT_EMAIL]):
+        log.error("Email env vars not set — skipping.")
+        return
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"👟 {len(deals)} Shoe Deal(s) Under ${PRICE_THRESHOLD:.0f} Found!"
+    msg["From"] = GMAIL_USER
+    msg["To"] = ALERT_EMAIL
+    plain = "\n".join(
+        f"{d['shoe']} — ${d['price']:.2f} at {d['store']}: {d['url']}"
+        for d in sorted(deals, key=lambda x: x["price"])
+    )
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(build_html_email(deals), "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_USER, ALERT_EMAIL, msg.as_string())
+    log.info("Email sent to %s with %d deal(s).", ALERT_EMAIL, len(deals))
+
+
+def run():
+    log.info("Starting scan — threshold $%.2f — %d shoes", PRICE_THRESHOLD, len(SHOES))
+    all_deals = []
+    for shoe in SHOES:
+        log.info("Scanning: %s", shoe)
+        deals = search_google_shopping(shoe)
+        deals += search_ebay(shoe)
+        seen = set()
+        unique = []
+        for d in deals:
+            key = (d["title"][:40], d["store"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(d)
+        if unique:
+            log.info("  ✓ %d deal(s) found for %s", len(unique), shoe)
+        else:
+            log.info("  – No deals under $%.2f for %s", PRICE_THRESHOLD, shoe)
+        all_deals.extend(unique)
+        time.sleep(random.uniform(3, 7))
+
+    with open("scan_results.json", "w") as f:
+        json.dump({
+            "run_at": datetime.utcnow().isoformat(),
+            "threshold": PRICE_THRESHOLD,
+            "deals_found": len(all_deals),
+            "deals": all_deals,
+        }, f, indent=2)
+
+    if all_deals:
+        send_email(all_deals)
+    else:
+        log.info("No deals found today — no email sent.")
+
+
+if __name__ == "__main__":
+    run()
