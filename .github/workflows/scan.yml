@@ -32,6 +32,7 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           PRICE_THRESHOLD: ${{ github.event.inputs.price_threshold || '70' }}
         run: python .github/workflows/src/scanner.py
 
