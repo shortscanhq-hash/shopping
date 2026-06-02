@@ -3,16 +3,17 @@ import json
 import smtplib
 import logging
 import time
-import random
-import re
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
-from bs4 import BeautifulSoup
 
 PRICE_THRESHOLD = float(os.getenv("PRICE_THRESHOLD", "70"))
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+GMAIL_USER = os.getenv("GMAIL_USER")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
 SHOES = [
     "Brooks Ghost", "Brooks Glycerin", "Saucony Ride", "Saucony Triumph",
@@ -24,91 +25,40 @@ SHOES = [
     "Nike Pegasus", "Nike Vomero", "Nike Invincible Run",
 ]
 
-GMAIL_USER = os.getenv("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL")
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 
-def search_google_shopping(shoe):
-    query = f"{shoe} running shoes sale"
-    url = f"https://www.google.com/search?q={requests.utils.quote(query)}&tbm=shop&hl=en&gl=us"
+def search_shoe(shoe):
     deals = []
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get("https://serpapi.com/search", params={
+            "engine": "google_shopping",
+            "q": f"{shoe} running shoes",
+            "api_key": SERPAPI_KEY,
+            "gl": "us",
+            "hl": "en",
+        }, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for card in soup.select(".sh-dgr__grid-result, .KZmu8e, .i0X6df"):
+        data = resp.json()
+
+        for item in data.get("shopping_results", []):
             try:
-                title_el = card.select_one(".tAxDx, .Xjkr3b, .BvQan")
-                price_el = card.select_one(".a8Pemb, .kHxwFf, .OFFNJ")
-                store_el = card.select_one(".aULzUe, .IuHnof, .LbUacb")
-                link_el = card.select_one("a[href]")
-                if not title_el or not price_el:
-                    continue
-                title = title_el.get_text(strip=True)
-                price_raw = price_el.get_text(strip=True)
-                store = store_el.get_text(strip=True) if store_el else "Unknown"
-                href = link_el["href"] if link_el else ""
-                price_str = re.sub(r"[^\d.]", "", price_raw.split("–")[0])
-                if not price_str:
-                    continue
-                price = float(price_str)
+                price = float(str(item.get("price", "")).replace("$", "").replace(",", ""))
                 if price <= PRICE_THRESHOLD:
                     deals.append({
-                        "shoe": shoe, "title": title, "price": price,
-                        "store": store,
-                        "url": f"https://www.google.com{href}" if href.startswith("/") else href,
+                        "shoe": shoe,
+                        "title": item.get("title", ""),
+                        "price": price,
+                        "store": item.get("source", "Unknown"),
+                        "url": item.get("link", ""),
                     })
-            except (ValueError, AttributeError):
+            except (ValueError, TypeError):
                 continue
-    except requests.RequestException as e:
-        log.warning("Google request failed for '%s': %s", shoe, e)
-    return deals
 
+    except Exception as e:
+        log.warning("Search failed for '%s': %s", shoe, e)
 
-def search_ebay(shoe):
-    query = f"{shoe} running shoes"
-    url = (
-        f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(query)}"
-        f"&_sop=15&LH_BIN=1&_udhi={int(PRICE_THRESHOLD)}"
-    )
-    deals = []
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for item in soup.select(".s-item")[:10]:
-            try:
-                title_el = item.select_one(".s-item__title")
-                price_el = item.select_one(".s-item__price")
-                link_el = item.select_one(".s-item__link")
-                if not title_el or not price_el or not link_el:
-                    continue
-                title = title_el.get_text(strip=True)
-                if "Shop on eBay" in title:
-                    continue
-                price_raw = price_el.get_text(strip=True)
-                price_str = re.sub(r"[^\d.]", "", price_raw.split(" to ")[0])
-                if not price_str:
-                    continue
-                price = float(price_str)
-                if price <= PRICE_THRESHOLD:
-                    deals.append({
-                        "shoe": shoe, "title": title, "price": price,
-                        "store": "eBay", "url": link_el["href"],
-                    })
-            except (ValueError, AttributeError):
-                continue
-    except requests.RequestException as e:
-        log.warning("eBay request failed for '%s': %s", shoe, e)
     return deals
 
 
@@ -147,7 +97,7 @@ def build_html_email(deals):
           </table>
         </div>
         <div style="padding:16px 32px;background:#f9fafb;font-size:12px;color:#6b7280">
-          Threshold: ${PRICE_THRESHOLD:.2f} • Scanner ran at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+          Threshold: ${PRICE_THRESHOLD:.2f} • Ran at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
         </div>
       </div>
     </body></html>"""
@@ -155,7 +105,7 @@ def build_html_email(deals):
 
 def send_email(deals):
     if not all([GMAIL_USER, GMAIL_APP_PASSWORD, ALERT_EMAIL]):
-        log.error("Email env vars not set — skipping.")
+        log.error("Email secrets not set.")
         return
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"👟 {len(deals)} Shoe Deal(s) Under ${PRICE_THRESHOLD:.0f} Found!"
@@ -170,29 +120,22 @@ def send_email(deals):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         server.sendmail(GMAIL_USER, ALERT_EMAIL, msg.as_string())
-    log.info("Email sent to %s with %d deal(s).", ALERT_EMAIL, len(deals))
+    log.info("Email sent with %d deal(s).", len(deals))
 
 
 def run():
     log.info("Starting scan — threshold $%.2f — %d shoes", PRICE_THRESHOLD, len(SHOES))
     all_deals = []
+
     for shoe in SHOES:
         log.info("Scanning: %s", shoe)
-        deals = search_google_shopping(shoe)
-        deals += search_ebay(shoe)
-        seen = set()
-        unique = []
-        for d in deals:
-            key = (d["title"][:40], d["store"])
-            if key not in seen:
-                seen.add(key)
-                unique.append(d)
-        if unique:
-            log.info("  ✓ %d deal(s) found for %s", len(unique), shoe)
+        deals = search_shoe(shoe)
+        if deals:
+            log.info("  ✓ %d deal(s) for %s", len(deals), shoe)
         else:
             log.info("  – No deals under $%.2f for %s", PRICE_THRESHOLD, shoe)
-        all_deals.extend(unique)
-        time.sleep(random.uniform(3, 7))
+        all_deals.extend(deals)
+        time.sleep(1)
 
     with open("scan_results.json", "w") as f:
         json.dump({
@@ -205,7 +148,7 @@ def run():
     if all_deals:
         send_email(all_deals)
     else:
-        log.info("No deals found today — no email sent.")
+        log.info("No deals found — no email sent.")
 
 
 if __name__ == "__main__":
